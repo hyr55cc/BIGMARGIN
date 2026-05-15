@@ -32,10 +32,9 @@ const SAUDI_STOCKS = [
 ];
 
 const API_KEY = 'fa3181ee46f84bea82cc1e8e02fd6146';
-const EXCHANGE = 'XSAU';
 
 let cache = { data: null, ts: 0 };
-const CACHE_TTL = 10 * 60 * 1000; // 10 دقائق
+const CACHE_TTL = 10 * 60 * 1000;
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -44,91 +43,56 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const now = Date.now();
-
-  // أرجع الـ cache لو لا يزال صالحاً
   if (cache.data && now - cache.ts < CACHE_TTL) {
-    return res.status(200).json({
-      ok: true,
-      cached: true,
-      updatedAt: new Date(cache.ts).toISOString(),
-      data: cache.data,
-    });
+    return res.status(200).json({ ok: true, cached: true, updatedAt: new Date(cache.ts).toISOString(), data: cache.data });
   }
 
   try {
-    // Twelve Data يقبل حتى 120 رمز في طلب واحد مفصول بفاصلة
-    const symbols = SAUDI_STOCKS.map(s => `${s.sym}:${EXCHANGE}`).join(',');
-const url = `https://api.twelvedata.com/price?symbol=${encodeURIComponent(symbols)}&apikey=${API_KEY}&dp=2`;
+    // Twelve Data: الرمز مع البورصة بالشكل الصحيح
+    // السوق السعودي = TADAWUL أو XSAU
+    const symbols = SAUDI_STOCKS.map(s => `${s.sym}/SAR:TADAWUL`).join(',');
+    const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbols)}&apikey=${API_KEY}&dp=2&country=Saudi Arabia`;
+
     const r = await fetch(url);
     if (!r.ok) throw new Error(`Twelve Data HTTP ${r.status}`);
     const json = await r.json();
 
-    // لو سهم واحد فقط يرجع object مش array
-    const normalize = (key, val) => {
-      if (val?.code) return null; // خطأ في هذا السهم
-      return val;
-    };
+    // لو خطأ عام
+    if (json.code && json.status === 'error') throw new Error(json.message);
 
     const data = SAUDI_STOCKS.map(stock => {
-      const key = `${stock.sym}:${EXCHANGE}`;
-      const q = SAUDI_STOCKS.length === 1 ? json : (json[key] || json[stock.sym] || null);
+      const key = `${stock.sym}/SAR:TADAWUL`;
+      // لو سهم واحد يرجع مباشرة، لو أكثر يرجع object بالمفاتيح
+      const q = SAUDI_STOCKS.length === 1 ? json : (json[key] || null);
 
       if (!q || q.code || !q.close) {
-        return {
-          id: stock.id,
-          sym: stock.sym,
-          name: stock.name,
-          cat: stock.cat,
-          price: null,
-          error: q?.message || 'unavailable',
-        };
+        return { id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat, price: null, error: q?.message || 'unavailable' };
       }
 
       const price     = parseFloat(q.close);
-      const prevClose = parseFloat(q.previous_close);
+      const prevClose = parseFloat(q.previous_close || q.open);
       const change    = parseFloat((price - prevClose).toFixed(2));
-      const changePct = parseFloat(((change / prevClose) * 100).toFixed(2));
+      const changePct = prevClose ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0;
 
       return {
-        id:        stock.id,
-        sym:       stock.sym,
-        name:      stock.name,
-        cat:       stock.cat,
-        price,
-        prevClose,
-        change,
-        changePct,
-        open:      parseFloat(q.open)   || price,
-        high:      parseFloat(q.high)   || price,
-        low:       parseFloat(q.low)    || price,
-        volume:    parseInt(q.volume)   || 0,
-        source:    'twelvedata',
+        id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat,
+        price, prevClose, change, changePct,
+        open:   parseFloat(q.open)   || price,
+        high:   parseFloat(q.high)   || price,
+        low:    parseFloat(q.low)    || price,
+        volume: parseInt(q.volume)   || 0,
+        source: 'twelvedata',
       };
     });
 
     const found = data.filter(d => d.price !== null).length;
     cache = { data, ts: now };
 
-    return res.status(200).json({
-      ok: true,
-      cached: false,
-      updatedAt: new Date().toISOString(),
-      found: `${found}/${SAUDI_STOCKS.length}`,
-      data,
-    });
+    return res.status(200).json({ ok: true, cached: false, updatedAt: new Date().toISOString(), found: `${found}/${SAUDI_STOCKS.length}`, data });
 
   } catch (err) {
     console.error('quotes error:', err.message);
-    // أرجع الـ cache القديم إذا فشل الطلب
-    if (cache.data) {
-      return res.status(200).json({
-        ok: true,
-        cached: true,
-        stale: true,
-        updatedAt: new Date(cache.ts).toISOString(),
-        data: cache.data,
-      });
-    }
+    if (cache.data) return res.status(200).json({ ok: true, cached: true, stale: true, data: cache.data });
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
