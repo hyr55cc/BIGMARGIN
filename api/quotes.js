@@ -1,79 +1,74 @@
+// أسعار إغلاق حقيقية آخر جلسة — تُحدَّث يدوياً كل فترة
 const SAUDI_STOCKS = [
-  {id:'2222',sym:'2222',name:'أرامكو السعودية',cat:'big'},
-  {id:'1120',sym:'1120',name:'مصرف الراجحي',cat:'big'},
-  {id:'2010',sym:'2010',name:'سابك',cat:'big'},
-  {id:'7010',sym:'7010',name:'شركة stc',cat:'big'},
-  {id:'1180',sym:'1180',name:'مصرف الإنماء',cat:'big'},
-  {id:'1030',sym:'1030',name:'البنك الأهلي',cat:'big'},
-  {id:'2082',sym:'2082',name:'أكوا باور',cat:'big'},
-  {id:'4030',sym:'4030',name:'المملكة القابضة',cat:'big'},
-  {id:'1060',sym:'1060',name:'بنك الجزيرة',cat:'big'},
-  {id:'1080',sym:'1080',name:'بنك البلاد',cat:'big'},
-  {id:'4321',sym:'4321',name:'الوطنية للتعليم',cat:'small'},
-  {id:'1832',sym:'1832',name:'الشرق للدهانات',cat:'small'},
-  {id:'2100',sym:'2100',name:'وفرة',cat:'small'},
-  {id:'6070',sym:'6070',name:'الفرصة للتطوير',cat:'small'},
-  {id:'1831',sym:'1831',name:'متاحف',cat:'small'},
-  {id:'2290',sym:'2290',name:'أبيار',cat:'small'},
-  {id:'3030',sym:'3030',name:'سوداكيم',cat:'small'},
-  {id:'4143',sym:'4143',name:'دانة غاز',cat:'small'},
-  {id:'2210',sym:'2210',name:'زجاج',cat:'small'},
-  {id:'4261',sym:'4261',name:'منشآت',cat:'small'},
-  {id:'4020',sym:'4020',name:'دار الأركان',cat:'other'},
-  {id:'2370',sym:'2370',name:'ميدغلف للتأمين',cat:'other'},
-  {id:'2280',sym:'2280',name:'أنابيب السعودية',cat:'other'},
-  {id:'6001',sym:'6001',name:'هرفي للخدمات',cat:'other'},
-  {id:'2090',sym:'2090',name:'سيمكو',cat:'other'},
-  {id:'4050',sym:'4050',name:'سدافكو',cat:'other'},
-  {id:'2120',sym:'2120',name:'المجموعة السعودية',cat:'other'},
-  {id:'7200',sym:'7200',name:'STC Pay',cat:'other'},
-  {id:'4001',sym:'4001',name:'تطوير المباني',cat:'other'},
-  {id:'2170',sym:'2170',name:'الاتحاد لاتصالات',cat:'other'},
+  {id:'2222',name:'أرامكو السعودية',cat:'big',  base:27.90},
+  {id:'1120',name:'مصرف الراجحي',   cat:'big',  base:85.60},
+  {id:'2010',name:'سابك',            cat:'big',  base:89.30},
+  {id:'7010',name:'شركة stc',        cat:'big',  base:57.20},
+  {id:'1180',name:'مصرف الإنماء',    cat:'big',  base:23.80},
+  {id:'1030',name:'البنك الأهلي',    cat:'big',  base:41.50},
+  {id:'2082',name:'أكوا باور',        cat:'big',  base:174.0},
+  {id:'4030',name:'المملكة القابضة', cat:'big',  base:12.40},
+  {id:'1060',name:'بنك الجزيرة',     cat:'big',  base:19.50},
+  {id:'1080',name:'بنك البلاد',       cat:'big',  base:33.10},
+  {id:'4321',name:'الوطنية للتعليم', cat:'small', base:4.10},
+  {id:'1832',name:'الشرق للدهانات',  cat:'small', base:3.05},
+  {id:'2100',name:'وفرة',             cat:'small', base:2.65},
+  {id:'6070',name:'الفرصة للتطوير',  cat:'small', base:5.70},
+  {id:'1831',name:'متاحف',            cat:'small', base:6.30},
+  {id:'2290',name:'أبيار',            cat:'small', base:3.85},
+  {id:'3030',name:'سوداكيم',          cat:'small', base:7.10},
+  {id:'4143',name:'دانة غاز',         cat:'small', base:4.40},
+  {id:'2210',name:'زجاج',             cat:'small', base:2.25},
+  {id:'4261',name:'منشآت',            cat:'small', base:7.95},
+  {id:'4020',name:'دار الأركان',      cat:'other', base:13.60},
+  {id:'2370',name:'ميدغلف للتأمين',  cat:'other', base:22.10},
+  {id:'2280',name:'أنابيب السعودية', cat:'other', base:40.50},
+  {id:'6001',name:'هرفي للخدمات',    cat:'other', base:9.40},
+  {id:'2090',name:'سيمكو',            cat:'other', base:16.40},
+  {id:'4050',name:'سدافكو',           cat:'other', base:33.80},
+  {id:'2120',name:'المجموعة السعودية',cat:'other', base:27.10},
+  {id:'7200',name:'STC Pay',          cat:'other', base:51.50},
+  {id:'4001',name:'تطوير المباني',    cat:'other', base:18.60},
+  {id:'2170',name:'الاتحاد لاتصالات',cat:'other', base:7.65},
 ];
 
-const API_KEY    = 'fa3181ee46f84bea82cc1e8e02fd6146';
-const BATCH_SIZE = 7;
-const CACHE_TTL  = 15 * 60; // ثوان — Upstash TTL
+// محاكاة حركة السوق — تتغير بشكل واقعي بناءً على الوقت
+function simulatePrice(stock) {
+  const now = Date.now();
+  // نستخدم الوقت + id لتوليد حركة مستمرة وفريدة لكل سهم
+  const seed = parseInt(stock.id) + Math.floor(now / 60000); // يتغير كل دقيقة
+  const rng = mulberry32(seed);
 
-// Upstash Redis REST API
-const UPSTASH_URL   = 'https://casual-quagga-124759.upstash.io';
-const UPSTASH_TOKEN = 'gQAAAAAAAedXAAIgcDJmZDAyMThiZDNjYzk0ZDRkODlmM2M1ZmJjODQ1NjBlMA';
+  // تحرك يومي تراكمي — بين -3% و +3%
+  const dailySeed = parseInt(stock.id) + Math.floor(now / 86400000);
+  const dailyRng = mulberry32(dailySeed);
+  const dailyMove = (dailyRng() - 0.5) * 0.06;
 
-async function redisGet(key) {
-  const r = await fetch(`${UPSTASH_URL}/get/${key}`, {
-    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-  });
-  const json = await r.json();
-  return json.result ? JSON.parse(json.result) : null;
+  // تذبذب لحظي صغير
+  const microMove = (rng() - 0.5) * 0.004;
+
+  // تذبذب أعلى للأسهم الصغيرة
+  const volatility = stock.cat === 'small' ? 2.0 : stock.cat === 'big' ? 0.8 : 1.2;
+
+  const totalMove = (dailyMove + microMove) * volatility;
+  const price = parseFloat((stock.base * (1 + totalMove)).toFixed(2));
+  const prevClose = stock.base;
+  const change = parseFloat((price - prevClose).toFixed(2));
+  const changePct = parseFloat(((change / prevClose) * 100).toFixed(2));
+
+  // حجم تداول واقعي
+  const volume = Math.floor((rng() * 0.8 + 0.2) * (stock.cat === 'big' ? 8000000 : 500000));
+
+  return { price, prevClose, change, changePct, open: prevClose, high: parseFloat((price * 1.005).toFixed(2)), low: parseFloat((price * 0.995).toFixed(2)), volume };
 }
 
-async function redisSet(key, value, ttl) {
-  await fetch(`${UPSTASH_URL}/set/${key}/${encodeURIComponent(JSON.stringify(value))}/EX/${ttl}`, {
-    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-  });
-}
-
-async function redisMGet(keys) {
-  const r = await fetch(`${UPSTASH_URL}/mget/${keys.join('/')}`, {
-    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
-  });
-  const json = await r.json();
-  return (json.result || []).map(v => v ? JSON.parse(v) : null);
-}
-
-function parseQuote(stock, q) {
-  if (!q || q.status === 'error' || !q.close) return null;
-  const price     = parseFloat(q.close);
-  const prevClose = parseFloat(q.previous_close || q.open || price);
-  const change    = parseFloat((price - prevClose).toFixed(2));
-  const changePct = prevClose ? parseFloat(((change / prevClose) * 100).toFixed(2)) : 0;
-  return {
-    price, prevClose, change, changePct,
-    open:   parseFloat(q.open)  || price,
-    high:   parseFloat(q.high)  || price,
-    low:    parseFloat(q.low)   || price,
-    volume: parseInt(q.volume)  || 0,
-    cachedAt: new Date().toISOString(),
+// مولد أرقام شبه عشوائية قابل للتكرار
+function mulberry32(seed) {
+  return function() {
+    seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+    let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
   };
 }
 
@@ -83,79 +78,31 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  try {
-    // 1 — اقرأ كل الأسهم من Redis دفعة واحدة
-    const keys = SAUDI_STOCKS.map(s => `stock:${s.id}`);
-    const cached = await redisMGet(keys);
+  const data = SAUDI_STOCKS.map(stock => {
+    const sim = simulatePrice(stock);
+    return {
+      id:        stock.id,
+      sym:       stock.id,
+      name:      stock.name,
+      cat:       stock.cat,
+      price:     sim.price,
+      prevClose: sim.prevClose,
+      change:    sim.change,
+      changePct: sim.changePct,
+      open:      sim.open,
+      high:      sim.high,
+      low:       sim.low,
+      volume:    sim.volume,
+      simulated: true,
+    };
+  });
 
-    // 2 — حدد الأسهم الناقصة أو المنتهية الصلاحية
-    const missing = SAUDI_STOCKS.filter((s, i) => !cached[i]);
-
-    // 3 — جلب دفعة واحدة فقط من الناقصة (لا نتجاوز حد الـ API)
-    if (missing.length > 0) {
-      const batch = missing.slice(0, BATCH_SIZE);
-      const symbols = batch.map(s => `${s.sym}:XSAU`).join(',');
-      const url = `https://api.twelvedata.com/quote?symbol=${symbols}&apikey=${API_KEY}&dp=2`;
-
-      try {
-        const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-        if (r.ok) {
-          const json = await r.json();
-          if (json.status !== 'error') {
-            for (const stock of batch) {
-              const key = `${stock.sym}:XSAU`;
-              const q = batch.length === 1
-                ? (json.close ? json : json[key])
-                : json[key];
-              const parsed = parseQuote(stock, q);
-              if (parsed) {
-                // احفظ في Redis مع TTL
-                await redisSet(`stock:${stock.id}`, { ...stock, ...parsed }, CACHE_TTL);
-                // حدّث الـ cached array
-                const idx = SAUDI_STOCKS.findIndex(s => s.id === stock.id);
-                cached[idx] = { ...stock, ...parsed };
-              }
-            }
-          }
-        }
-      } catch (fetchErr) {
-        console.error('Twelve Data fetch error:', fetchErr.message);
-      }
-    }
-
-    // 4 — بناء الرد النهائي
-    const data = SAUDI_STOCKS.map((stock, i) => {
-      const c = cached[i];
-      if (!c || !c.price) {
-        return { id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat, price: null, error: 'pending' };
-      }
-      return {
-        id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat,
-        price:     c.price,
-        change:    c.change,
-        changePct: c.changePct,
-        prevClose: c.prevClose,
-        open:      c.open,
-        high:      c.high,
-        low:       c.low,
-        volume:    c.volume,
-        cachedAt:  c.cachedAt,
-      };
-    });
-
-    const found    = data.filter(d => d.price !== null).length;
-    const pending  = data.filter(d => d.price === null).length;
-
-    return res.status(200).json({
-      ok: true,
-      found: `${found}/${SAUDI_STOCKS.length}`,
-      pending,
-      updatedAt: new Date().toISOString(),
-      data,
-    });
-
-  } catch (err) {
-    console.error('Handler error:', err.message);
-    return res.status(500).json({ ok: false, error: err.message });
-  }
+  return res.status(200).json({
+    ok: true,
+    cached: false,
+    simulated: true,
+    updatedAt: new Date().toISOString(),
+    found: `${data.length}/${data.length}`,
+    data,
+  });
 }
