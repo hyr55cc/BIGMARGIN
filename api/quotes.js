@@ -1,3 +1,6 @@
+let cache = { data: null, ts: 0 };
+const CACHE_TTL = 10 * 60 * 1000;
+
 const SAUDI_STOCKS = [
   {id:'2222',sym:'2222.SR',name:'أرامكو السعودية',cat:'big'},
   {id:'1120',sym:'1120.SR',name:'مصرف الراجحي',cat:'big'},
@@ -31,8 +34,117 @@ const SAUDI_STOCKS = [
   {id:'2170',sym:'2170.SR',name:'الاتحاد لاتصالات',cat:'other'},
 ];
 
-let cache = { data: null, ts: 0 };
-const CACHE_TTL = 10 * 60 * 1000;
+// ── الحصول على crumb + cookie من Yahoo Finance ──
+async function getYahooCrumb() {
+  try {
+    // الخطوة 1: احصل على cookie
+    const cookieRes = await fetch('https://finance.yahoo.com', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+        'Accept': 'text/html',
+      },
+      redirect: 'follow',
+    });
+    const cookies = cookieRes.headers.get('set-cookie') || '';
+
+    // الخطوة 2: احصل على crumb
+    const crumbRes = await fetch('https://query1.finance.yahoo.com/v1/test/getcrumb', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+        'Cookie': cookies,
+      },
+    });
+    const crumb = await crumbRes.text();
+    return { crumb: crumb.trim(), cookies };
+  } catch(e) {
+    console.error('getYahooCrumb failed:', e.message);
+    return null;
+  }
+}
+
+// ── جلب من Yahoo Finance مع crumb ──
+async function fetchWithCrumb(symbols) {
+  const auth = await getYahooCrumb();
+  if (!auth?.crumb) return null;
+
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols}&crumb=${encodeURIComponent(auth.crumb)}`;
+  try {
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
+        'Cookie': auth.cookies,
+        'Accept': 'application/json',
+      },
+    });
+    if (!r.ok) return null;
+    const json = await r.json();
+    return json?.quoteResponse?.result || null;
+  } catch(e) {
+    console.error('fetchWithCrumb failed:', e.message);
+    return null;
+  }
+}
+
+// ── جلب من Stooq (مصدر بديل مجاني) ──
+async function fetchFromStooq(stockId) {
+  try {
+    const sym = `${stockId}.sa`; // رمز Stooq للسوق السعودي
+    const url = `https://stooq.com/q/l/?s=${sym}&f=sd2t2ohlcv&h&e=json`;
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    });
+    if (!r.ok) return null;
+    const json = await r.json();
+    const s = json?.symbols?.[0];
+    if (!s || !s.close) return null;
+    return {
+      price: parseFloat(s.close),
+      open: parseFloat(s.open),
+      high: parseFloat(s.high),
+      low: parseFloat(s.low),
+      volume: parseInt(s.volume) || 0,
+      prevClose: parseFloat(s.open), // تقريب
+      change: parseFloat(s.close) - parseFloat(s.open),
+      changePct: ((parseFloat(s.close) - parseFloat(s.open)) / parseFloat(s.open)) * 100,
+    };
+  } catch(e) {
+    return null;
+  }
+}
+
+// ── جلب سهم واحد من Yahoo Chart API (لا يحتاج crumb) ──
+async function fetchSingleChart(sym) {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${sym}?interval=1d&range=2d`;
+    const r = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'Accept': 'application/json',
+      },
+    });
+    if (!r.ok) return null;
+    const json = await r.json();
+    const result = json?.chart?.result?.[0];
+    if (!result) return null;
+    const meta = result.meta;
+    const price = meta.regularMarketPrice;
+    const prevClose = meta.chartPreviousClose || meta.previousClose;
+    const change = price - prevClose;
+    const changePct = (change / prevClose) * 100;
+    return {
+      price: parseFloat(price?.toFixed(2)),
+      prevClose: parseFloat(prevClose?.toFixed(2)),
+      change: parseFloat(change?.toFixed(2)),
+      changePct: parseFloat(changePct?.toFixed(2)),
+      open: meta.regularMarketOpen || price,
+      high: meta.regularMarketDayHigh || price,
+      low: meta.regularMarketDayLow || price,
+      volume: meta.regularMarketVolume || 0,
+    };
+  } catch(e) {
+    return null;
+  }
+}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -40,78 +152,74 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
+  const now = Date.now();
+
+  // أرجع الـ cache لو لا يزال صالحاً
+  if (cache.data && now - cache.ts < CACHE_TTL) {
+    return res.status(200).json({ ok: true, cached: true, updatedAt: new Date(cache.ts).toISOString(), data: cache.data });
+  }
+
   try {
-    const now = Date.now();
-    if (cache.data && now - cache.ts < CACHE_TTL) {
-      return res.status(200).json({ ok: true, cached: true, updatedAt: new Date(cache.ts).toISOString(), data: cache.data });
-    }
-
     const symbols = SAUDI_STOCKS.map(s => s.sym).join(',');
+    let quotesMap = {};
 
-    // محاولة أولى: query2 v7
-    let json = await tryFetch(`https://query2.finance.yahoo.com/v7/finance/quote?symbols=${symbols}`);
-
-    // محاولة ثانية: query1 v7
-    if (!json?.quoteResponse?.result?.length) {
-      json = await tryFetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols}`);
+    // ── المحاولة 1: Yahoo مع crumb ──
+    const crumbResults = await fetchWithCrumb(symbols);
+    if (crumbResults?.length) {
+      crumbResults.forEach(q => {
+        quotesMap[q.symbol.replace('.SR', '')] = {
+          price:     parseFloat((q.regularMarketPrice || 0).toFixed(2)),
+          change:    parseFloat((q.regularMarketChange || 0).toFixed(2)),
+          changePct: parseFloat((q.regularMarketChangePercent || 0).toFixed(2)),
+          prevClose: parseFloat((q.regularMarketPreviousClose || 0).toFixed(2)),
+          open:      parseFloat((q.regularMarketOpen || 0).toFixed(2)),
+          high:      parseFloat((q.regularMarketDayHigh || 0).toFixed(2)),
+          low:       parseFloat((q.regularMarketDayLow || 0).toFixed(2)),
+          volume:    q.regularMarketVolume || 0,
+          source:    'yahoo',
+        };
+      });
     }
 
-    // محاولة ثالثة: v8
-    if (!json?.quoteResponse?.result?.length) {
-      json = await tryFetch(`https://query1.finance.yahoo.com/v8/finance/quote?symbols=${symbols}&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketPreviousClose`);
+    // ── المحاولة 2: Yahoo Chart API لكل سهم ناقص ──
+    const missing = SAUDI_STOCKS.filter(s => !quotesMap[s.id]);
+    if (missing.length > 0) {
+      // نجلب بالتوازي - 5 في المرة
+      const chunks = [];
+      for (let i = 0; i < missing.length; i += 5) chunks.push(missing.slice(i, i+5));
+      for (const chunk of chunks) {
+        await Promise.all(chunk.map(async s => {
+          const q = await fetchSingleChart(s.sym);
+          if (q) quotesMap[s.id] = { ...q, source: 'yahoo-chart' };
+        }));
+      }
     }
 
-    const quotes = json?.quoteResponse?.result || [];
-
+    // ── بناء النتيجة النهائية ──
     const data = SAUDI_STOCKS.map(stock => {
-      const q = quotes.find(r => r.symbol === stock.sym);
-      if (!q) return { ...stock, price: null, error: 'not_found' };
-      return {
-        id: stock.id,
-        sym: stock.sym,
-        name: stock.name,
-        cat: stock.cat,
-        price:     q.regularMarketPrice             ?? null,
-        change:    q.regularMarketChange            ?? null,
-        changePct: q.regularMarketChangePercent     ?? null,
-        prevClose: q.regularMarketPreviousClose     ?? null,
-        open:      q.regularMarketOpen              ?? null,
-        high:      q.regularMarketDayHigh           ?? null,
-        low:       q.regularMarketDayLow            ?? null,
-        volume:    q.regularMarketVolume            ?? null,
-      };
+      const q = quotesMap[stock.id];
+      if (!q || !q.price) {
+        return { id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat, price: null, error: 'unavailable' };
+      }
+      return { id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat, ...q };
     });
 
+    const found = data.filter(d => d.price !== null).length;
     cache = { data, ts: now };
-    return res.status(200).json({ ok: true, cached: false, updatedAt: new Date().toISOString(), data });
+
+    return res.status(200).json({
+      ok: true,
+      cached: false,
+      updatedAt: new Date().toISOString(),
+      found: `${found}/${SAUDI_STOCKS.length}`,
+      data,
+    });
 
   } catch (err) {
+    console.error('Handler error:', err);
     if (cache.data) {
       return res.status(200).json({ ok: true, cached: true, stale: true, updatedAt: new Date(cache.ts).toISOString(), data: cache.data });
     }
     return res.status(500).json({ ok: false, error: err.message });
-  }
-}
-
-async function tryFetch(url) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const r = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://finance.yahoo.com/',
-        'Origin': 'https://finance.yahoo.com',
-      },
-    });
-    clearTimeout(timeout);
-    if (!r.ok) { console.error('tryFetch HTTP', r.status, url); return null; }
-    return await r.json();
-  } catch(e) {
-    console.error('tryFetch error:', e.message, url);
-    return null;
   }
 }
