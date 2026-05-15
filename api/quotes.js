@@ -58,8 +58,7 @@ export default async function handler(req, res) {
   try {
     // Twelve Data يقبل حتى 120 رمز في طلب واحد مفصول بفاصلة
     const symbols = SAUDI_STOCKS.map(s => `${s.sym}:${EXCHANGE}`).join(',');
-    const url = `https://api.twelvedata.com/quote?symbol=${encodeURIComponent(symbols)}&apikey=${API_KEY}&dp=2`;
-
+const url = `https://api.twelvedata.com/price?symbol=${encodeURIComponent(symbols)}&apikey=${API_KEY}&dp=2`;
     const r = await fetch(url);
     if (!r.ok) throw new Error(`Twelve Data HTTP ${r.status}`);
     const json = await r.json();
