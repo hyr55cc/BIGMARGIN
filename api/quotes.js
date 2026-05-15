@@ -31,30 +31,38 @@ const SAUDI_STOCKS = [
   {id:'2170',sym:'2170',name:'الاتحاد لاتصالات',cat:'other'},
 ];
 
-const API_KEY = 'fa3181ee46f84bea82cc1e8e02fd6146';
+const API_KEY    = 'fa3181ee46f84bea82cc1e8e02fd6146';
 const BATCH_SIZE = 7;
+const CACHE_TTL  = 15 * 60; // ثوان — Upstash TTL
 
-// Global cache — يبقى في الذاكرة طالما الـ serverless instance شغّال
-const stockCache = {}; // { id: { price, change, ... , ts } }
-const STOCK_TTL = 15 * 60 * 1000; // 15 دقيقة لكل سهم
+// Upstash Redis REST API
+const UPSTASH_URL   = 'https://casual-quagga-124759.upstash.io';
+const UPSTASH_TOKEN = 'gQAAAAAAAedXAAIgcDJmZDAyMThiZDNjYzk0ZDRkODlmM2M1ZmJjODQ1NjBlMA';
 
-// نحسب رقم الـ batch الحالي بناءً على الوقت
-// كل دقيقة نجلب batch مختلف — بالتناوب
-function getCurrentBatchIndex() {
-  const minute = Math.floor(Date.now() / 60000);
-  const totalBatches = Math.ceil(SAUDI_STOCKS.length / BATCH_SIZE);
-  return minute % totalBatches;
+async function redisGet(key) {
+  const r = await fetch(`${UPSTASH_URL}/get/${key}`, {
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+  });
+  const json = await r.json();
+  return json.result ? JSON.parse(json.result) : null;
 }
 
-function isStale(id) {
-  if (!stockCache[id]) return true;
-  return Date.now() - stockCache[id].ts > STOCK_TTL;
+async function redisSet(key, value, ttl) {
+  await fetch(`${UPSTASH_URL}/set/${key}/${encodeURIComponent(JSON.stringify(value))}/EX/${ttl}`, {
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+  });
+}
+
+async function redisMGet(keys) {
+  const r = await fetch(`${UPSTASH_URL}/mget/${keys.join('/')}`, {
+    headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+  });
+  const json = await r.json();
+  return (json.result || []).map(v => v ? JSON.parse(v) : null);
 }
 
 function parseQuote(stock, q) {
-  if (!q || q.status === 'error' || !q.close) {
-    return null;
-  }
+  if (!q || q.status === 'error' || !q.close) return null;
   const price     = parseFloat(q.close);
   const prevClose = parseFloat(q.previous_close || q.open || price);
   const change    = parseFloat((price - prevClose).toFixed(2));
@@ -65,8 +73,7 @@ function parseQuote(stock, q) {
     high:   parseFloat(q.high)  || price,
     low:    parseFloat(q.low)   || price,
     volume: parseInt(q.volume)  || 0,
-    ts:     Date.now(),
-    source: 'twelvedata',
+    cachedAt: new Date().toISOString(),
   };
 }
 
@@ -77,76 +84,78 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   try {
-    // حدد الـ batch الحالي بناءً على الدقيقة الحالية
-    const batchIndex = getCurrentBatchIndex();
-    const start = batchIndex * BATCH_SIZE;
-    const batch = SAUDI_STOCKS.slice(start, start + BATCH_SIZE);
+    // 1 — اقرأ كل الأسهم من Redis دفعة واحدة
+    const keys = SAUDI_STOCKS.map(s => `stock:${s.id}`);
+    const cached = await redisMGet(keys);
 
-    // جلب فقط الأسهم التي انتهت صلاحيتها
-    const toFetch = batch.filter(s => isStale(s.id));
+    // 2 — حدد الأسهم الناقصة أو المنتهية الصلاحية
+    const missing = SAUDI_STOCKS.filter((s, i) => !cached[i]);
 
-    if (toFetch.length > 0) {
-      const symbols = toFetch.map(s => `${s.sym}:XSAU`).join(',');
+    // 3 — جلب دفعة واحدة فقط من الناقصة (لا نتجاوز حد الـ API)
+    if (missing.length > 0) {
+      const batch = missing.slice(0, BATCH_SIZE);
+      const symbols = batch.map(s => `${s.sym}:XSAU`).join(',');
       const url = `https://api.twelvedata.com/quote?symbol=${symbols}&apikey=${API_KEY}&dp=2`;
 
-      const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
-      if (r.ok) {
-        const json = await r.json();
-        if (json.status !== 'error') {
-          toFetch.forEach(stock => {
-            const key = `${stock.sym}:XSAU`;
-            // لو سهم واحد يرجع مباشرة
-            const q = toFetch.length === 1
-              ? (json.close ? json : json[key])
-              : json[key];
-            const parsed = parseQuote(stock, q);
-            if (parsed) stockCache[stock.id] = parsed;
-          });
+      try {
+        const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        if (r.ok) {
+          const json = await r.json();
+          if (json.status !== 'error') {
+            for (const stock of batch) {
+              const key = `${stock.sym}:XSAU`;
+              const q = batch.length === 1
+                ? (json.close ? json : json[key])
+                : json[key];
+              const parsed = parseQuote(stock, q);
+              if (parsed) {
+                // احفظ في Redis مع TTL
+                await redisSet(`stock:${stock.id}`, { ...stock, ...parsed }, CACHE_TTL);
+                // حدّث الـ cached array
+                const idx = SAUDI_STOCKS.findIndex(s => s.id === stock.id);
+                cached[idx] = { ...stock, ...parsed };
+              }
+            }
+          }
         }
+      } catch (fetchErr) {
+        console.error('Twelve Data fetch error:', fetchErr.message);
       }
     }
 
-    // بناء الرد الكامل من الـ cache
-    const data = SAUDI_STOCKS.map(stock => {
-      const cached = stockCache[stock.id];
-      if (!cached) {
+    // 4 — بناء الرد النهائي
+    const data = SAUDI_STOCKS.map((stock, i) => {
+      const c = cached[i];
+      if (!c || !c.price) {
         return { id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat, price: null, error: 'pending' };
       }
       return {
         id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat,
-        price:     cached.price,
-        change:    cached.change,
-        changePct: cached.changePct,
-        prevClose: cached.prevClose,
-        open:      cached.open,
-        high:      cached.high,
-        low:       cached.low,
-        volume:    cached.volume,
-        updatedAt: new Date(cached.ts).toISOString(),
+        price:     c.price,
+        change:    c.change,
+        changePct: c.changePct,
+        prevClose: c.prevClose,
+        open:      c.open,
+        high:      c.high,
+        low:       c.low,
+        volume:    c.volume,
+        cachedAt:  c.cachedAt,
       };
     });
 
-    const found = data.filter(d => d.price !== null).length;
-    const totalBatches = Math.ceil(SAUDI_STOCKS.length / BATCH_SIZE);
+    const found    = data.filter(d => d.price !== null).length;
+    const pending  = data.filter(d => d.price === null).length;
 
     return res.status(200).json({
       ok: true,
       found: `${found}/${SAUDI_STOCKS.length}`,
-      currentBatch: `${batchIndex + 1}/${totalBatches}`,
-      nextBatchIn: `${60 - new Date().getSeconds()}s`,
+      pending,
       updatedAt: new Date().toISOString(),
       data,
     });
 
   } catch (err) {
     console.error('Handler error:', err.message);
-    // أرجع ما في الـ cache حتى لو فيه خطأ
-    const data = SAUDI_STOCKS.map(stock => {
-      const cached = stockCache[stock.id];
-      return cached
-        ? { id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat, ...cached }
-        : { id: stock.id, sym: stock.sym, name: stock.name, cat: stock.cat, price: null, error: 'error' };
-    });
-    return res.status(200).json({ ok: true, stale: true, error: err.message, data });
+    return res.status(500).json({ ok: false, error: err.message });
   }
 }
